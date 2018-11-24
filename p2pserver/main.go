@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -20,9 +19,8 @@ import (
 
 	"path/filepath"
 
-	"github.com/golang/snappy"
-	"github.com/urfave/cli"
 	"github.com/hikaricai/p2p_tun/kcp-go"
+	"github.com/urfave/cli"
 )
 
 var (
@@ -31,34 +29,6 @@ var (
 	// SALT is use for pbkdf2 key expansion
 	SALT = "kcp-go"
 )
-
-type compStream struct {
-	conn net.Conn
-	w    *snappy.Writer
-	r    *snappy.Reader
-}
-
-func (c *compStream) Read(p []byte) (n int, err error) {
-	return c.r.Read(p)
-}
-
-func (c *compStream) Write(p []byte) (n int, err error) {
-	n, err = c.w.Write(p)
-	err = c.w.Flush()
-	return n, err
-}
-
-func (c *compStream) Close() error {
-	return c.conn.Close()
-}
-
-func newCompStream(conn net.Conn) *compStream {
-	c := new(compStream)
-	c.conn = conn
-	c.w = snappy.NewBufferedWriter(conn)
-	c.r = snappy.NewReader(conn)
-	return c
-}
 
 func checkError(err error) {
 	if err != nil {
@@ -74,24 +44,14 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
 	myApp := cli.NewApp()
-	myApp.Name = "kcptun"
-	myApp.Usage = "server(with SMUX)"
+	myApp.Name = "p2pserver"
+	myApp.Usage = "server(with kcptun)"
 	myApp.Version = VERSION
 	myApp.Flags = []cli.Flag{
 		cli.StringFlag{
-			Name:  "bind,b",
-			Value: ":12948",
-			Usage: "local listen address",
-		},
-		cli.StringFlag{
 			Name:  "listen,l",
-			Value: ":29900",
+			Value: ":4000",
 			Usage: "kcp server listen address",
-		},
-		cli.StringFlag{
-			Name:  "target, t",
-			Value: "127.0.0.1:12948",
-			Usage: "target server address",
 		},
 		cli.StringFlag{
 			Name:   "key",
@@ -106,7 +66,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "mode",
-			Value: "fast",
+			Value: "fast2",
 			Usage: "profiles: fast3, fast2, fast, normal, manual",
 		},
 		cli.IntFlag{
@@ -389,7 +349,7 @@ func handleClient(conn *kcp.UDPSession) {
 				delete(keymap, key)
 				keymu.Unlock()
 				peer.chPair <- remoteAddr
-				jsonPairMess := phaseJsonMess("pair", peerAddr)
+				jsonPairMess := phaseJsonMess("pair_c", peerAddr)
 				conn.Write(jsonPairMess)
 			} else {
 				log.Println("no peer, registed")
@@ -435,7 +395,7 @@ func notifyAddr(conn *kcp.UDPSession, peer *Peer, chThreadDie chan struct{}){
 		case <-chThreadDie:
 			return
 		case peerAddr := <-peer.chPair:
-			jsonPairMess := phaseJsonMess("pair", peerAddr)
+			jsonPairMess := phaseJsonMess("pair_s", peerAddr)
 			conn.Write(jsonPairMess)
 			return
 		}

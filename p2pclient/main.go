@@ -16,9 +16,8 @@ import (
 
 	"golang.org/x/crypto/pbkdf2"
 
-	"github.com/golang/snappy"
-	"github.com/urfave/cli"
 	"github.com/hikaricai/p2p_tun/kcp-go"
+	"github.com/urfave/cli"
 	"github.com/xtaci/smux"
 
 	"path/filepath"
@@ -29,35 +28,8 @@ var (
 	VERSION = "SELFBUILD"
 	// SALT is use for pbkdf2 key expansion
 	SALT = "kcp-go"
+	isServer = false
 )
-
-type compStream struct {
-	conn net.Conn
-	w    *snappy.Writer
-	r    *snappy.Reader
-}
-
-func (c *compStream) Read(p []byte) (n int, err error) {
-	return c.r.Read(p)
-}
-
-func (c *compStream) Write(p []byte) (n int, err error) {
-	n, err = c.w.Write(p)
-	err = c.w.Flush()
-	return n, err
-}
-
-func (c *compStream) Close() error {
-	return c.conn.Close()
-}
-
-func newCompStream(conn net.Conn) *compStream {
-	c := new(compStream)
-	c.conn = conn
-	c.w = snappy.NewBufferedWriter(conn)
-	c.r = snappy.NewReader(conn)
-	return c
-}
 
 func handleLocalTcp(sess *smux.Session, p1 io.ReadWriteCloser, quiet bool) {
 	if !quiet {
@@ -102,8 +74,8 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
 	myApp := cli.NewApp()
-	myApp.Name = "kcptun"
-	myApp.Usage = "client(with SMUX)"
+	myApp.Name = "p2pclient"
+	myApp.Usage = "client(with kcptun)"
 	myApp.Version = VERSION
 	myApp.Flags = []cli.Flag{
 		cli.StringFlag{
@@ -131,10 +103,6 @@ func main() {
 			Value: "1234",
 			Usage: "p2p pair key",
 		},
-		cli.BoolFlag{
-			Name:  "server, s",
-			Usage: "bind local udp",
-		},
 		cli.StringFlag{
 			Name:   "passwd",
 			Value:  "1234",
@@ -148,7 +116,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "mode",
-			Value: "fast",
+			Value: "fast2",
 			Usage: "profiles: fast3, fast2, fast, normal, manual",
 		},
 		cli.IntFlag{
@@ -261,7 +229,6 @@ func main() {
 		config.RemoteUdp = c.String("remoteudp")
 		config.TargetTcp = c.String("targettcp")
 		config.BindUdp = c.String("bindudp")
-		config.IsServer = c.Bool("server")
 		config.Key		= c.String("key")
 		config.Passwd = c.String("passwd")
 		config.Crypt = c.String("crypt")
@@ -412,6 +379,7 @@ func getPeerAddr(config *Config)(string, error){
 	}
 	log.Println("writen ", n)
 	for {
+		pair_s := false
 		log.Println("waiting for server")
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -425,7 +393,11 @@ func getPeerAddr(config *Config)(string, error){
 		case "ping":
 			atomic.StoreInt32(&dataReady, 1)
 			log.Println("rcv ping")
-		case "pair":
+		case "pair_s":
+			pair_s = true
+			fallthrough
+		case "pair_c":
+			isServer = pair_s
 			peerAddr = mess.Data
 			log.Println("peer addr is ", peerAddr)
 			n, err := kcpConn.Write(finMess)
@@ -489,7 +461,7 @@ func newSmuxSession(udpconn net.PacketConn, config *Config, remoteAddr string) (
 	// stream multiplex
 	var smuxSession *smux.Session
 
-	if config.IsServer {
+	if isServer {
 		smuxSession, err = smux.Server(kcpconn, smuxConfig)
 	} else {
 		smuxSession, err = smux.Client(kcpconn, smuxConfig)

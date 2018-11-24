@@ -11,7 +11,6 @@ type Config struct {
 	TargetTcp    string `json:"targettcp"`
 	BindUdp      string `json:"bindudp"`
 	RemoteUdp    string `json:"remoteudp"`
-	IsServer     bool   `json:"isserver"`
 	Key          string `json:"key"`
 	Passwd		 string `json:"passwd"`
 	Crypt        string `json:"crypt"`
