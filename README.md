@@ -77,6 +77,6 @@ GLOBAL OPTIONS:
 
 ### References
 
-1. https://github.com/xtaci/kcptun/ -- A Stable & Secure Tunnel Based On KCP with N:M Multiplexing
+1. https://github.com/xtaci/kcptun/ --- A Stable & Secure Tunnel Based On KCP with N:M Multiplexing
 
 
