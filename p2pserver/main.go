@@ -66,7 +66,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "mode",
-			Value: "fast2",
+			Value: "fast",
 			Usage: "profiles: fast3, fast2, fast, normal, manual",
 		},
 		cli.IntFlag{
