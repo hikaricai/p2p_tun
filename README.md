@@ -1,8 +1,6 @@
 ### Introduction
->A p2p tunnel which establish port forwarding channel for both clients for some special uses, and whitch
- based on kcptun
-
->Need one server with public ip and only one udp port for hole digging. 
+>A p2p tunnel(based on kcptun) which establishs port forwarding channel for both clients.
+>Need one server with public ip and one udp port for hole digging. 
 
 ### QuickStart
 Download a corresponding one from precompiled [Releases](https://github.com/hikaricai/p2p_tun/releases).
@@ -14,13 +12,13 @@ Client_B: ./p2pclient -b ":UDP_PORT" -r "SERVER_IP:4000" -l ":10022" -t "TARGET_
 ```
 The above commands will establish port forwarding channel for both Client_A and Client_B as:
 
-> Application -> **Client_A(10022/tcp) -> Client_B** -> TARGET_IP_B:(22/tcp)
-> Application -> **Client_B(10022/tcp) -> Client_A** -> TARGET_IP_A:(22/tcp)
+> Application1 -> **Client_A(10022/tcp) -> Client_B** -> TARGET_IP_B:(22/tcp)
+> Application2 -> **Client_B(10022/tcp) -> Client_A** -> TARGET_IP_A:(22/tcp)
 
 which tunnels the original connection:
 
-> Application -> TARGET_IP_B:(22/tcp)
-> Application -> TARGET_IP_B:(22/tcp)
+> Application1 -> TARGET_IP_B:(22/tcp)
+> Application2 -> TARGET_IP_A:(22/tcp)
 
 ### Install from source
 
