@@ -12,12 +12,12 @@ Client_B: ./p2pclient -b ":UDP_PORT" -r "SERVER_IP:4000" -l ":10022" -t "TARGET_
 ```
 The above commands will establish port forwarding channel for both Client_A and Client_B as:
 
-> Application1 -> **Client_A(10022/tcp) -> Client_B** -> TARGET_IP_B:(22/tcp)
+> Application1 -> **Client_A(10022/tcp) -> Client_B** -> TARGET_IP_B:(22/tcp)  
 > Application2 -> **Client_B(10022/tcp) -> Client_A** -> TARGET_IP_A:(22/tcp)
 
 which tunnels the original connection:
 
-> Application1 -> TARGET_IP_B:(22/tcp)
+> Application1 -> TARGET_IP_B:(22/tcp)  
 > Application2 -> TARGET_IP_A:(22/tcp)
 
 ### Install from source
