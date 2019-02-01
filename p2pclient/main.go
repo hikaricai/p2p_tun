@@ -85,12 +85,12 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "listentcp,l",
-			Value: ":12948",
+			Value: ":2022",
 			Usage: "local listen address",
 		},
 		cli.StringFlag{
 			Name:  "remoteudp, r",
-			Value: "vps:29900",
+			Value: "127.0.0.1:4000",
 			Usage: "kcp server address",
 		},
 		cli.StringFlag{
@@ -301,8 +301,11 @@ func main() {
 		go tcpListener(chTCPConn, &config)
 		for{
 			peerAddr, err := getPeerAddr(&config)
+			time.Sleep(2*time.Second)
 			if err == nil{
 				p2pHandle(&config, peerAddr, chTCPConn)
+			}else{
+				time.Sleep(5*time.Second)
 			}
 		}
 	}
@@ -400,13 +403,8 @@ func getPeerAddr(config *Config)(string, error){
 			isServer = pair_s
 			peerAddr = mess.Data
 			log.Println("peer addr is ", peerAddr)
-			n, err := kcpConn.Write(finMess)
-			if err != nil {
-				log.Println("kcpConn.Write", err)
-				return "", err
-			}
-			log.Println("writen ", n)
-			time.Sleep(1*time.Second)
+			kcpConn.Write(finMess)
+		case "fin":
 			return peerAddr, nil
 		}
 	}

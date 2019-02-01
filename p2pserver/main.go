@@ -6,10 +6,9 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"github.com/hikaricai/p2p_tun/kcp-go"
 	"log"
 	"math/rand"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -19,7 +18,6 @@ import (
 
 	"path/filepath"
 
-	"github.com/hikaricai/p2p_tun/kcp-go"
 	"github.com/urfave/cli"
 )
 
@@ -54,7 +52,7 @@ func main() {
 			Usage: "kcp server listen address",
 		},
 		cli.StringFlag{
-			Name:   "key",
+			Name:   "passwd",
 			Value:  "1234",
 			Usage:  "pre-shared secret between client and server",
 			EnvVar: "KCPTUN_KEY",
@@ -170,7 +168,7 @@ func main() {
 	myApp.Action = func(c *cli.Context) error {
 		config := Config{}
 		config.Listen = c.String("listen")
-		config.Key = c.String("key")
+		config.Passwd = c.String("passwd")
 		config.Crypt = c.String("crypt")
 		config.Mode = c.String("mode")
 		config.MTU = c.Int("mtu")
@@ -220,7 +218,7 @@ func main() {
 
 		log.Println("version:", VERSION)
 		log.Println("initiating key derivation")
-		pass := pbkdf2.Key([]byte(config.Key), []byte(SALT), 4096, 32, sha1.New)
+		pass := pbkdf2.Key([]byte(config.Passwd), []byte(SALT), 4096, 32, sha1.New)
 		var block kcp.BlockCrypt
 		switch config.Crypt {
 		case "sm4":
@@ -281,9 +279,6 @@ func main() {
 		}
 
 		go snmpLogger(config.SnmpLog, config.SnmpPeriod)
-		if config.Pprof {
-			go http.ListenAndServe(":6060", nil)
-		}
 
 		for {
 			log.Println("listening new kcp")
@@ -310,20 +305,26 @@ type DigHoleMess struct {
 	Data string
 }
 
-type Peer struct {
+type P2PSession struct {
 	addr   string
 	chPair chan string
+	conn1 *kcp.UDPSession
+	conn2 *kcp.UDPSession
+	chFin chan struct{}
 }
 
-var keymap = make(map[string]*Peer)
+var keymap = make(map[string]*P2PSession)
 
 var keymu  sync.Mutex
+
+var session *P2PSession;
 
 func handleClient(conn *kcp.UDPSession) {
 	reader := bufio.NewReader(conn)
 	defer conn.Close()
 	var dataReady int32
-	var chThreadDie chan struct{}= make(chan struct{})
+	var chThreadDie = make(chan struct{})
+	var ok bool;
 	defer close(chThreadDie)
 	go timeout(conn, &dataReady, chThreadDie)
 	for {
@@ -333,31 +334,34 @@ func handleClient(conn *kcp.UDPSession) {
 			return
 		}
 		var mess DigHoleMess
-		json.Unmarshal([]byte(line), &mess)
+		err = json.Unmarshal([]byte(line), &mess)
+		if err != nil{
+			continue
+		}
 		switch mess.Cmd {
 		case "login":
 			remoteAddr := conn.RemoteAddr().String()
 			log.Println("login from ", remoteAddr)
 			key := mess.Data
-
 			log.Println("key is ", key)
+
 			keymu.Lock()
-			peer, ok := keymap[key]
+			session, ok = keymap[key]
 			if ok {
-				peerAddr := peer.addr
+				peerAddr := session.addr
 				log.Println("find peer and addr is", peerAddr)
 				delete(keymap, key)
-				keymu.Unlock()
-				peer.chPair <- remoteAddr
+				session.conn2 = conn
+				session.chPair <- remoteAddr
 				jsonPairMess := phaseJsonMess("pair_c", peerAddr)
 				conn.Write(jsonPairMess)
 			} else {
 				log.Println("no peer, registed")
-				peer := Peer{remoteAddr, make(chan string)}
-				keymap[key] = &peer
-				keymu.Unlock()
-				go notifyAddr(conn, &peer, chThreadDie)
+				session = &P2PSession{remoteAddr, make(chan string), conn, nil,make(chan struct{})}
+				keymap[key] = session
+				go p2pSessionHandler(session, chThreadDie)
 			}
+			keymu.Unlock()
 		case "ping":
 			atomic.StoreInt32(&dataReady, 1)
 			jsonPingMess := phaseJsonMess("ping", "hello")
@@ -365,8 +369,7 @@ func handleClient(conn *kcp.UDPSession) {
 			log.Println("rcv ping from ", conn.RemoteAddr().String())
 		case "fin":
 			log.Println("fin from", conn.RemoteAddr().String())
-			time.Sleep(time.Second)
-			return
+			session.chFin <- struct{}{}
 		}
 	}
 }
@@ -389,15 +392,26 @@ func timeout(conn *kcp.UDPSession, dataReady *int32, chThreadDie chan struct{}){
 	}
 }
 
-func notifyAddr(conn *kcp.UDPSession, peer *Peer, chThreadDie chan struct{}){
+func p2pSessionHandler(session *P2PSession, chThreadDie chan struct{}){
+	finCnt :=0
 	for {
 		select {
 		case <-chThreadDie:
 			return
-		case peerAddr := <-peer.chPair:
+		case peerAddr := <-session.chPair:
 			jsonPairMess := phaseJsonMess("pair_s", peerAddr)
-			conn.Write(jsonPairMess)
-			return
+			session.conn1.Write(jsonPairMess)
+		case <-session.chFin:
+			finCnt++
+			if finCnt == 2{
+				jsonPairMess := phaseJsonMess("fin", "bye")
+				session.conn1.Write(jsonPairMess)
+				session.conn2.Write(jsonPairMess)
+				time.Sleep(time.Second)
+				session.conn1.Close()
+				session.conn2.Close()
+				return
+			}
 		}
 	}
 }

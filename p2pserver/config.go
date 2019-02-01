@@ -8,7 +8,7 @@ import (
 // Config for server
 type Config struct {
 	Listen       string `json:"listen"`
-	Key          string `json:"key"`
+	Passwd       string `json:"passwd"`
 	Crypt        string `json:"crypt"`
 	Mode         string `json:"mode"`
 	MTU          int    `json:"mtu"`
