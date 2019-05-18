@@ -7,8 +7,8 @@ Download a corresponding one from precompiled [Releases](https://github.com/hika
 
 ```
 Server: ./p2pserver -l ":4000" 
-Client_A: ./p2pclient -b ":UDP_PORT" -r "SERVER_IP:4000" -l ":10022" -t "TARGET_IP_A:22"  -k 4321
-Client_B: ./p2pclient -b ":UDP_PORT" -r "SERVER_IP:4000" -l ":10022" -t "TARGET_IP_B:22"  -k 4321
+Client_A: ./p2pclient -r "SERVER_IP:4000" -l ":10022" -t "TARGET_IP_A:22"  -k 4321
+Client_B: ./p2pclient -r "SERVER_IP:4000" -l ":10022" -t "TARGET_IP_B:22"  -k 4321
 ```
 The above commands will establish port forwarding channel for both Client_A and Client_B as:
 
