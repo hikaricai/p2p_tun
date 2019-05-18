@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha1"
-	"encoding/csv"
 	"encoding/json"
-	"fmt"
 	"github.com/hikaricai/p2p_tun/kcp-go"
 	"log"
 	"math/rand"
@@ -16,8 +14,6 @@ import (
 
 	"golang.org/x/crypto/pbkdf2"
 
-	"path/filepath"
-
 	"github.com/urfave/cli"
 )
 
@@ -26,6 +22,7 @@ var (
 	VERSION = "SELFBUILD"
 	// SALT is use for pbkdf2 key expansion
 	SALT = "kcp-go"
+	pingInterval = 10
 )
 
 func checkError(err error) {
@@ -48,7 +45,7 @@ func main() {
 	myApp.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:  "listen,l",
-			Value: ":4000",
+			Value: "0.0.0.0:4000",
 			Usage: "kcp server listen address",
 		},
 		cli.StringFlag{
@@ -59,7 +56,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "crypt",
-			Value: "aes",
+			Value: "none",
 			Usage: "aes, aes-128, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none",
 		},
 		cli.StringFlag{
@@ -84,12 +81,12 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:  "datashard,ds",
-			Value: 10,
+			Value: 0,
 			Usage: "set reed-solomon erasure coding - datashard",
 		},
 		cli.IntFlag{
 			Name:  "parityshard,ps",
-			Value: 3,
+			Value: 0,
 			Usage: "set reed-solomon erasure coding - parityshard",
 		},
 		cli.IntFlag{
@@ -185,7 +182,6 @@ func main() {
 		config.NoCongestion = c.Int("nc")
 		config.SockBuf = c.Int("sockbuf")
 		config.KeepAlive = c.Int("keepalive")
-		config.Log = c.String("log")
 		config.SnmpLog = c.String("snmplog")
 		config.SnmpPeriod = c.Int("snmpperiod")
 		config.Pprof = c.Bool("pprof")
@@ -196,15 +192,6 @@ func main() {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
 		}
-
-		// log redirect
-		if config.Log != "" {
-			f, err := os.OpenFile(config.Log, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-			checkError(err)
-			defer f.Close()
-			log.SetOutput(f)
-		}
-
 		switch config.Mode {
 		case "normal":
 			config.NoDelay, config.Interval, config.Resend, config.NoCongestion = 0, 40, 2, 1
@@ -253,20 +240,6 @@ func main() {
 		lis, err := kcp.ListenWithOptions(config.Listen, block, config.DataShard, config.ParityShard)
 		checkError(err)
 		log.Println("listening on:", lis.Addr())
-		log.Println("encryption:", config.Crypt)
-		log.Println("nodelay parameters:", config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
-		log.Println("sndwnd:", config.SndWnd, "rcvwnd:", config.RcvWnd)
-		log.Println("compression:", !config.NoComp)
-		log.Println("mtu:", config.MTU)
-		log.Println("datashard:", config.DataShard, "parityshard:", config.ParityShard)
-		log.Println("acknodelay:", config.AckNodelay)
-		log.Println("dscp:", config.DSCP)
-		log.Println("sockbuf:", config.SockBuf)
-		log.Println("keepalive:", config.KeepAlive)
-		log.Println("snmplog:", config.SnmpLog)
-		log.Println("snmpperiod:", config.SnmpPeriod)
-		log.Println("pprof:", config.Pprof)
-		log.Println("quiet:", config.Quiet)
 
 		if err := lis.SetDSCP(config.DSCP); err != nil {
 			log.Println("SetDSCP:", err)
@@ -277,8 +250,6 @@ func main() {
 		if err := lis.SetWriteBuffer(config.SockBuf); err != nil {
 			log.Println("SetWriteBuffer:", err)
 		}
-
-		go snmpLogger(config.SnmpLog, config.SnmpPeriod)
 
 		for {
 			log.Println("listening new kcp")
@@ -305,28 +276,54 @@ type DigHoleMess struct {
 	Data string
 }
 
+type UdpSess struct {
+	conn *kcp.UDPSession
+	pingFlag int32
+	isFin bool
+}
 type P2PSession struct {
-	addr   string
-	chPair chan string
-	conn1 *kcp.UDPSession
-	conn2 *kcp.UDPSession
+	key string
+	sess1 *UdpSess
+	sess2 *UdpSess
 	chFin chan struct{}
+	mu  sync.Mutex
 }
 
 var keymap = make(map[string]*P2PSession)
 
 var keymu  sync.Mutex
-
-var session *P2PSession;
-
+func registSession(session *P2PSession, sess *UdpSess) (ret bool){
+	ret = true
+	session.mu.Lock()
+	if session.sess1 == nil{
+		session.sess1 = sess
+	}else if session.sess2 == nil{
+		session.sess2 = sess
+	}else{
+		ret = false
+	}
+	if  ret == true && session.sess1 != nil && session.sess2 != nil{
+		conn1 := session.sess1.conn
+		conn2 := session.sess2.conn
+		addr1 := conn1.RemoteAddr().String()
+		addr2 := conn2.RemoteAddr().String()
+		jsonPair1Mess := phaseJsonMess("pair_s", addr2)
+		jsonPair2Mess := phaseJsonMess("pair_c", addr1)
+		log.Println("pairing ", addr1,addr2)
+		conn1.Write(jsonPair1Mess)
+		conn2.Write(jsonPair2Mess)
+	}
+	session.mu.Unlock()
+	return ret
+}
 func handleClient(conn *kcp.UDPSession) {
+	var session *P2PSession;
+	key := ""
 	reader := bufio.NewReader(conn)
 	defer conn.Close()
-	var dataReady int32
-	var chThreadDie = make(chan struct{})
-	var ok bool;
-	defer close(chThreadDie)
-	go timeout(conn, &dataReady, chThreadDie)
+	var ok bool
+	var registed  = false
+	sess := &UdpSess{conn,1,false}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -342,74 +339,90 @@ func handleClient(conn *kcp.UDPSession) {
 		case "login":
 			remoteAddr := conn.RemoteAddr().String()
 			log.Println("login from ", remoteAddr)
-			key := mess.Data
+			key = mess.Data
 			log.Println("key is ", key)
-
 			keymu.Lock()
 			session, ok = keymap[key]
 			if ok {
-				peerAddr := session.addr
-				log.Println("find peer and addr is", peerAddr)
-				delete(keymap, key)
-				session.conn2 = conn
-				session.chPair <- remoteAddr
-				jsonPairMess := phaseJsonMess("pair_c", peerAddr)
-				conn.Write(jsonPairMess)
+				registed = registSession(session,sess)
 			} else {
-				log.Println("no peer, registed")
-				session = &P2PSession{remoteAddr, make(chan string), conn, nil,make(chan struct{})}
+				log.Println("make new P2PSession")
+				session = new(P2PSession)
+				session.key = key
+				session.sess1 = sess
+				session.chFin = make(chan struct{})
 				keymap[key] = session
-				go p2pSessionHandler(session, chThreadDie)
+				registed = true
+				go p2pSessionHandler(session)
 			}
 			keymu.Unlock()
-		case "ping":
-			atomic.StoreInt32(&dataReady, 1)
 			jsonPingMess := phaseJsonMess("ping", "hello")
 			conn.Write(jsonPingMess)
+		case "ping":
 			log.Println("rcv ping from ", conn.RemoteAddr().String())
+			if registed == false{
+				keymu.Lock()
+				session, ok = keymap[key]
+				if ok {
+					registed = registSession(session,sess)
+				} else {
+					log.Println("make new P2PSession")
+					session = new(P2PSession)
+					session.key = key
+					session.sess1 = sess
+					session.chFin = make(chan struct{})
+					keymap[key] = session
+					registed = true
+					go p2pSessionHandler(session)
+				}
+				keymu.Unlock()
+			}
+			atomic.StoreInt32(&sess.pingFlag, 1)
+			jsonPingMess := phaseJsonMess("ping", "hello")
+			conn.Write(jsonPingMess)
 		case "fin":
 			log.Println("fin from", conn.RemoteAddr().String())
+			sess.isFin = true
 			session.chFin <- struct{}{}
 		}
 	}
 }
 
-func timeout(conn *kcp.UDPSession, dataReady *int32, chThreadDie chan struct{}){
-	tickerDie := time.NewTicker(30*time.Second)
-	defer tickerDie.Stop()
 
+func p2pSessionHandler(session *P2PSession){
+	tickerPing := time.NewTicker(time.Duration(pingInterval)*time.Second)
+	defer tickerPing.Stop()
 	for {
 		select {
-		case <-tickerDie.C:
-			if !atomic.CompareAndSwapInt32(dataReady, 1, 0) {
-				log.Println("ping timeout")
-				conn.Close()
-				return
+		case <-tickerPing.C:
+			if session.sess1 != nil && !atomic.CompareAndSwapInt32(&session.sess1.pingFlag, 1, 0) {
+				session.mu.Lock()
+				session.sess1.conn.Close()
+				session.sess1 = nil
+				log.Println("sess1 ping timeout")
+				session.mu.Unlock()
 			}
-		case <-chThreadDie:
-			return
-		}
-	}
-}
-
-func p2pSessionHandler(session *P2PSession, chThreadDie chan struct{}){
-	finCnt :=0
-	for {
-		select {
-		case <-chThreadDie:
-			return
-		case peerAddr := <-session.chPair:
-			jsonPairMess := phaseJsonMess("pair_s", peerAddr)
-			session.conn1.Write(jsonPairMess)
+			if session.sess2 != nil && !atomic.CompareAndSwapInt32(&session.sess2.pingFlag, 1, 0) {
+				session.mu.Lock()
+				session.sess2.conn.Close()
+				session.sess2 = nil
+				log.Println("sess2 ping timeout")
+				session.mu.Unlock()
+			}
 		case <-session.chFin:
-			finCnt++
-			if finCnt == 2{
-				jsonPairMess := phaseJsonMess("fin", "bye")
-				session.conn1.Write(jsonPairMess)
-				session.conn2.Write(jsonPairMess)
+			if session.sess1 == nil || session.sess2 == nil{
+				continue
+			}
+			if session.sess1.isFin == true && session.sess2.isFin == true{
+				jsonFinMess := phaseJsonMess("fin", "bye")
+				session.sess1.conn.Write(jsonFinMess)
+				session.sess2.conn.Write(jsonFinMess)
 				time.Sleep(time.Second)
-				session.conn1.Close()
-				session.conn2.Close()
+				session.sess1.conn.Close()
+				session.sess2.conn.Close()
+				keymu.Lock()
+				delete(keymap,session.key)
+				keymu.Unlock()
 				return
 			}
 		}
@@ -423,38 +436,4 @@ func phaseJsonMess(cmd string, data string) []byte {
 		log.Println(err)
 	}
 	return append(jsonMess, '\n')
-}
-
-func snmpLogger(path string, interval int) {
-	if path == "" || interval == 0 {
-		return
-	}
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			// split path into dirname and filename
-			logdir, logfile := filepath.Split(path)
-			// only format logfile
-			f, err := os.OpenFile(logdir+time.Now().Format(logfile), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			w := csv.NewWriter(f)
-			// write header in empty file
-			if stat, err := f.Stat(); err == nil && stat.Size() == 0 {
-				if err := w.Write(append([]string{"Unix"}, kcp.DefaultSnmp.Header()...)); err != nil {
-					log.Println(err)
-				}
-			}
-			if err := w.Write(append([]string{fmt.Sprint(time.Now().Unix())}, kcp.DefaultSnmp.ToSlice()...)); err != nil {
-				log.Println(err)
-			}
-			kcp.DefaultSnmp.Reset()
-			w.Flush()
-			f.Close()
-		}
-	}
 }

@@ -45,3 +45,4 @@ func parseJSONConfig(config *Config, path string) error {
 
 	return json.NewDecoder(file).Decode(config)
 }
+

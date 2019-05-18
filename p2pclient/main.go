@@ -3,24 +3,20 @@ package main
 import (
 	"bufio"
 	"crypto/sha1"
-	"encoding/csv"
 	"encoding/json"
-	"fmt"
+	"github.com/hikaricai/p2p_tun/kcp-go"
+	"github.com/xtaci/kcptun/generic"
 	"io"
 	"log"
 	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
-
 	"golang.org/x/crypto/pbkdf2"
-
-	"github.com/hikaricai/p2p_tun/kcp-go"
 	"github.com/urfave/cli"
 	"github.com/xtaci/smux"
-
-	"path/filepath"
 )
 
 var (
@@ -29,6 +25,8 @@ var (
 	// SALT is use for pbkdf2 key expansion
 	SALT = "kcp-go"
 	isServer = false
+	pingInterval = 10
+	xmitBuf sync.Pool
 )
 
 func handleLocalTcp(sess *smux.Session, p1 io.ReadWriteCloser, quiet bool) {
@@ -36,7 +34,6 @@ func handleLocalTcp(sess *smux.Session, p1 io.ReadWriteCloser, quiet bool) {
 		log.Println("stream opened")
 		defer log.Println("stream closed")
 	}
-
 	defer p1.Close()
 	p2, err := sess.OpenStream()
 	if err != nil {
@@ -44,19 +41,20 @@ func handleLocalTcp(sess *smux.Session, p1 io.ReadWriteCloser, quiet bool) {
 	}
 	defer p2.Close()
 
-	// start tunnel
-	p1die := make(chan struct{})
-	buf1 := make([]byte, 65535)
-	go func() { io.CopyBuffer(p1, p2, buf1); close(p1die) }()
+	streamCopy := func(dst io.Writer, src io.ReadCloser) chan struct{} {
+		die := make(chan struct{})
+		go func() {
+			buf := xmitBuf.Get().([]byte)
+			generic.CopyBuffer(dst, src, buf)
+			xmitBuf.Put(buf)
+			close(die)
+		}()
+		return die
+	}
 
-	p2die := make(chan struct{})
-	buf2 := make([]byte, 65535)
-	go func() { io.CopyBuffer(p2, p1, buf2); close(p2die) }()
-
-	// wait for tunnel termination
 	select {
-	case <-p1die:
-	case <-p2die:
+	case <-streamCopy(p1, p2):
+	case <-streamCopy(p2, p1):
 	}
 }
 
@@ -72,6 +70,9 @@ func main() {
 	if VERSION == "SELFBUILD" {
 		// add more log flags for debugging
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
+	}
+	xmitBuf.New = func() interface{} {
+		return make([]byte, 32768)
 	}
 	myApp := cli.NewApp()
 	myApp.Name = "p2pclient"
@@ -94,11 +95,6 @@ func main() {
 			Usage: "kcp server address",
 		},
 		cli.StringFlag{
-			Name:  "bindudp, b",
-			Value: ":29900",
-			Usage: "bind local udp",
-		},
-		cli.StringFlag{
 			Name:  "key, k",
 			Value: "1234",
 			Usage: "p2p pair key",
@@ -111,7 +107,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "crypt",
-			Value: "aes",
+			Value: "none",
 			Usage: "aes, aes-128, aes-192, salsa20, blowfish, twofish, cast5, 3des, tea, xtea, xor, sm4, none",
 		},
 		cli.StringFlag{
@@ -146,12 +142,12 @@ func main() {
 		},
 		cli.IntFlag{
 			Name:  "datashard,ds",
-			Value: 10,
+			Value: 0,
 			Usage: "set reed-solomon erasure coding - datashard",
 		},
 		cli.IntFlag{
 			Name:  "parityshard,ps",
-			Value: 3,
+			Value: 0,
 			Usage: "set reed-solomon erasure coding - parityshard",
 		},
 		cli.IntFlag{
@@ -228,12 +224,10 @@ func main() {
 		config.ListenTcp = c.String("listentcp")
 		config.RemoteUdp = c.String("remoteudp")
 		config.TargetTcp = c.String("targettcp")
-		config.BindUdp = c.String("bindudp")
 		config.Key		= c.String("key")
 		config.Passwd = c.String("passwd")
 		config.Crypt = c.String("crypt")
 		config.Mode = c.String("mode")
-		config.AutoExpire = c.Int("autoexpire")
 		config.MTU = c.Int("mtu")
 		config.SndWnd = c.Int("sndwnd")
 		config.RcvWnd = c.Int("rcvwnd")
@@ -248,22 +242,11 @@ func main() {
 		config.NoCongestion = c.Int("nc")
 		config.SockBuf = c.Int("sockbuf")
 		config.KeepAlive = c.Int("keepalive")
-		config.Log = c.String("log")
-		config.SnmpLog = c.String("snmplog")
-		config.SnmpPeriod = c.Int("snmpperiod")
 		config.Quiet = c.Bool("quiet")
 
 		if c.String("c") != "" {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
-		}
-
-		// log redirect
-		if config.Log != "" {
-			f, err := os.OpenFile(config.Log, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-			checkError(err)
-			defer f.Close()
-			log.SetOutput(f)
 		}
 
 		switch config.Mode {
@@ -279,23 +262,6 @@ func main() {
 
 		log.Println("version:", VERSION)
 
-		log.Println("encryption:", config.Crypt)
-		log.Println("nodelay parameters:", config.NoDelay, config.Interval, config.Resend, config.NoCongestion)
-		log.Println("remote udp  address:", config.RemoteUdp)
-		log.Println("sndwnd:", config.SndWnd, "rcvwnd:", config.RcvWnd)
-		log.Println("compression:", !config.NoComp)
-		log.Println("mtu:", config.MTU)
-		log.Println("datashard:", config.DataShard, "parityshard:", config.ParityShard)
-		log.Println("acknodelay:", config.AckNodelay)
-		log.Println("dscp:", config.DSCP)
-		log.Println("sockbuf:", config.SockBuf)
-		log.Println("keepalive:", config.KeepAlive)
-		log.Println("autoexpire:", config.AutoExpire)
-		log.Println("snmplog:", config.SnmpLog)
-		log.Println("snmpperiod:", config.SnmpPeriod)
-		log.Println("quiet:", config.Quiet)
-		go snmpLogger(config.SnmpLog, config.SnmpPeriod)
-
 		chTCPConn := make(chan *net.TCPConn, 16)
 
 		go tcpListener(chTCPConn, &config)
@@ -305,7 +271,7 @@ func main() {
 			if err == nil{
 				p2pHandle(&config, peerAddr, chTCPConn)
 			}else{
-				time.Sleep(5*time.Second)
+				time.Sleep(time.Duration(pingInterval)*time.Second)
 			}
 		}
 	}
@@ -313,9 +279,9 @@ func main() {
 }
 
 func p2pHandle(config *Config, peerAddr string, chTCPConn chan *net.TCPConn){
-	udpAddr, err := net.ResolveUDPAddr("udp", config.BindUdp)
+	udpAddr, err := net.ResolveUDPAddr("udp4", config.BindUdp)
 	checkError(err)
-	udpconn, err := net.ListenUDP("udp", udpAddr)
+	udpconn, err := net.ListenUDP("udp4", udpAddr)
 	checkError(err)
 	defer udpconn.Close()
 
@@ -339,9 +305,9 @@ func p2pHandle(config *Config, peerAddr string, chTCPConn chan *net.TCPConn){
 }
 
 func tcpListener(chTCPConn chan *net.TCPConn, config *Config){
-	listenTcpAddr, err := net.ResolveTCPAddr("tcp", config.ListenTcp)
+	listenTcpAddr, err := net.ResolveTCPAddr("tcp4", config.ListenTcp)
 	checkError(err)
-	listener, err := net.ListenTCP("tcp", listenTcpAddr)
+	listener, err := net.ListenTCP("tcp4", listenTcpAddr)
 	checkError(err)
 	log.Println("listening on:", listener.Addr())
 	for{
@@ -355,11 +321,12 @@ func tcpListener(chTCPConn chan *net.TCPConn, config *Config){
 }
 
 func getPeerAddr(config *Config)(string, error){
-
-	udpAddr, err := net.ResolveUDPAddr("udp", config.BindUdp)
+	udpAddr, err := net.ResolveUDPAddr("udp4", "0.0.0.0:0")
 	checkError(err)
-	udpconn, err := net.ListenUDP("udp", udpAddr)
+	udpconn, err := net.ListenUDP("udp4", udpAddr)
 	checkError(err)
+	config.BindUdp = udpconn.LocalAddr().String()
+	log.Println("config.BindUdp is ", config.BindUdp)
 	defer udpconn.Close()
 
 	kcpConn, err := newKcpConn(udpconn, config, config.RemoteUdp)
@@ -375,14 +342,12 @@ func getPeerAddr(config *Config)(string, error){
 	finMess := phaseJsonMess("fin", "good bye")
 	var peerAddr string
 	log.Println("writing mess")
-	n, err := kcpConn.Write(pairMess)
+	_, err = kcpConn.Write(pairMess)
 	if err != nil {
 		log.Println("kcpConn.Write", err)
 		return "", err
 	}
-	log.Println("writen ", n)
 	for {
-		pair_s := false
 		log.Println("waiting for server")
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -397,10 +362,12 @@ func getPeerAddr(config *Config)(string, error){
 			atomic.StoreInt32(&dataReady, 1)
 			log.Println("rcv ping")
 		case "pair_s":
-			pair_s = true
-			fallthrough
+			isServer = true
+			peerAddr = mess.Data
+			log.Println("peer addr is ", peerAddr)
+			kcpConn.Write(finMess)
 		case "pair_c":
-			isServer = pair_s
+			isServer = false
 			peerAddr = mess.Data
 			log.Println("peer addr is ", peerAddr)
 			kcpConn.Write(finMess)
@@ -411,21 +378,18 @@ func getPeerAddr(config *Config)(string, error){
 }
 
 func pingCheck(conn *kcp.UDPSession, dataReady *int32, chPing chan struct {}){
-	tickerDie := time.NewTicker(30*time.Second)
-	defer tickerDie.Stop()
 	jsonPingMess := phaseJsonMess("ping", "hello")
-	tickerPing := time.NewTicker(10 * time.Second)
+	tickerPing := time.NewTicker(time.Duration(pingInterval)*time.Second)
 	defer tickerPing.Stop()
 	defer 	log.Println("pingCheck return")
 	for {
 		select {
-		case <-tickerDie.C:
+		case <-tickerPing.C:
 			if !atomic.CompareAndSwapInt32(dataReady, 1, 0) {
 				log.Println("ping timeout")
 				conn.Close()
 				return
 			}
-		case <-tickerPing.C:
 			conn.Write(jsonPingMess)
 		case <- chPing:
 			return
@@ -448,7 +412,6 @@ func phaseJsonMess(cmd string, data string) []byte {
 }
 
 func newSmuxSession(udpconn net.PacketConn, config *Config, remoteAddr string) (*smux.Session, error) {
-
 	kcpconn, err := newKcpConn(udpconn, config, remoteAddr)
 	if err != nil {
 		return nil, err
@@ -456,9 +419,9 @@ func newSmuxSession(udpconn net.PacketConn, config *Config, remoteAddr string) (
 	smuxConfig := smux.DefaultConfig()
 	smuxConfig.MaxReceiveBuffer = config.SockBuf
 	smuxConfig.KeepAliveInterval = time.Duration(config.KeepAlive) * time.Second
+	smuxConfig.KeepAliveTimeout = time.Duration(config.KeepAlive) * time.Second*3
 	// stream multiplex
 	var smuxSession *smux.Session
-
 	if isServer {
 		smuxSession, err = smux.Server(kcpconn, smuxConfig)
 	} else {
@@ -549,54 +512,22 @@ func handleTargetTcp(addr string, session *smux.Session, quiet bool) {
 			defer p1.Close()
 			defer p2.Close()
 
-			// start tunnel
-			p1die := make(chan struct{})
-			buf1 := make([]byte, 65535)
-			go func() { io.CopyBuffer(p1, p2, buf1); close(p1die) }()
+			streamCopy := func(dst io.Writer, src io.ReadCloser) chan struct{} {
+				die := make(chan struct{})
+				go func() {
+					buf := xmitBuf.Get().([]byte)
+					generic.CopyBuffer(dst, src, buf)
+					xmitBuf.Put(buf)
+					close(die)
+				}()
+				return die
+			}
 
-			p2die := make(chan struct{})
-			buf2 := make([]byte, 65535)
-			go func() { io.CopyBuffer(p2, p1, buf2); close(p2die) }()
-
-			// wait for tunnel termination
 			select {
-			case <-p1die:
-			case <-p2die:
+			case <-streamCopy(p1, p2):
+			case <-streamCopy(p2, p1):
 			}
 		}()
 	}
 }
 
-func snmpLogger(path string, interval int) {
-	if path == "" || interval == 0 {
-		return
-	}
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			// split path into dirname and filename
-			logdir, logfile := filepath.Split(path)
-			// only format logfile
-			f, err := os.OpenFile(logdir+time.Now().Format(logfile), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			w := csv.NewWriter(f)
-			// write header in empty file
-			if stat, err := f.Stat(); err == nil && stat.Size() == 0 {
-				if err := w.Write(append([]string{"Unix"}, kcp.DefaultSnmp.Header()...)); err != nil {
-					log.Println(err)
-				}
-			}
-			if err := w.Write(append([]string{fmt.Sprint(time.Now().Unix())}, kcp.DefaultSnmp.ToSlice()...)); err != nil {
-				log.Println(err)
-			}
-			kcp.DefaultSnmp.Reset()
-			w.Flush()
-			f.Close()
-		}
-	}
-}
